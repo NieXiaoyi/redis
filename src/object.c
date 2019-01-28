@@ -185,7 +185,7 @@ robj *createStringObjectFromLongDouble(long double value, int humanfriendly) {
 /* Duplicate a string object, with the guarantee that the returned object
  * has the same encoding as the original one.
  *
- * This function also guarantees that duplicating a small integere object
+ * This function also guarantees that duplicating a small integer object
  * (or a string object that contains a representation of a small integer)
  * will always result in a fresh object that is unshared (refcount == 1).
  *
@@ -1011,13 +1011,13 @@ struct redisMemOverhead *getMemoryOverheadData(void) {
 
     mem = 0;
     if (server.aof_state != AOF_OFF) {
-        mem += sdslen(server.aof_buf);
+        mem += sdsalloc(server.aof_buf);
         mem += aofRewriteBufferSize();
     }
     mh->aof_buffer = mem;
     mem_total+=mem;
 
-    mem = 0;
+    mem = server.lua_scripts_mem;
     mem += dictSize(server.lua_scripts) * sizeof(dictEntry) +
         dictSlots(server.lua_scripts) * sizeof(dictEntry*);
     mem += dictSize(server.repl_scriptcache_dict) * sizeof(dictEntry) +
@@ -1175,7 +1175,7 @@ sds getMemoryDoctorReport(void) {
             s = sdscatprintf(s," * High process RSS overhead: This instance has non-allocator RSS memory overhead is greater than 1.1 (this means that the Resident Set Size of the Redis process is much larger than the RSS the allocator holds). This problem may be due to Lua scripts or Modules.\n\n");
         }
         if (big_slave_buf) {
-            s = sdscat(s," * Big slave buffers: The slave output buffers in this instance are greater than 10MB for each slave (on average). This likely means that there is some slave instance that is struggling receiving data, either because it is too slow or because of networking issues. As a result, data piles on the master output buffers. Please try to identify what slave is not receiving data correctly and why. You can use the INFO output in order to check the slaves delays and the CLIENT LIST command to check the output buffers of each slave.\n\n");
+            s = sdscat(s," * Big replica buffers: The replica output buffers in this instance are greater than 10MB for each replica (on average). This likely means that there is some replica instance that is struggling receiving data, either because it is too slow or because of networking issues. As a result, data piles on the master output buffers. Please try to identify what replica is not receiving data correctly and why. You can use the INFO output in order to check the replicas delays and the CLIENT LIST command to check the output buffers of each replica.\n\n");
         }
         if (big_client_buf) {
             s = sdscat(s," * Big client buffers: The clients output buffers in this instance are greater than 200K per client (on average). This may result from different causes, like Pub/Sub clients subscribed to channels bot not receiving data fast enough, so that data piles on the Redis instance output buffer, or clients sending commands with large replies or very large sequences of commands in the same pipeline. Please use the CLIENT LIST command in order to investigate the issue if it causes problems in your instance, or to understand better why certain clients are using a big amount of memory.\n\n");
@@ -1285,9 +1285,18 @@ NULL
  *
  * Usage: MEMORY usage <key> */
 void memoryCommand(client *c) {
-    robj *o;
-
-    if (!strcasecmp(c->argv[1]->ptr,"usage") && c->argc >= 3) {
+    if (!strcasecmp(c->argv[1]->ptr,"help") && c->argc == 2) {
+        const char *help[] = {
+"DOCTOR - Return memory problems reports.",
+"MALLOC-STATS -- Return internal statistics report from the memory allocator.",
+"PURGE -- Attempt to purge dirty pages for reclamation by the allocator.",
+"STATS -- Return information about the memory usage of the server.",
+"USAGE <key> [SAMPLES <count>] -- Return memory in bytes used by <key> and its value. Nested values are sampled up to <count> times (default: 5).",
+NULL
+        };
+        addReplyHelp(c, help);
+    } else if (!strcasecmp(c->argv[1]->ptr,"usage") && c->argc >= 3) {
+        dictEntry *de;
         long long samples = OBJ_COMPUTE_SIZE_DEF_SAMPLES;
         for (int j = 3; j < c->argc; j++) {
             if (!strcasecmp(c->argv[j]->ptr,"samples") &&
@@ -1306,10 +1315,12 @@ void memoryCommand(client *c) {
                 return;
             }
         }
-        if ((o = objectCommandLookupOrReply(c,c->argv[2],shared.nullbulk))
-                == NULL) return;
-        size_t usage = objectComputeSize(o,samples);
-        usage += sdsAllocSize(c->argv[2]->ptr);
+        if ((de = dictFind(c->db->dict,c->argv[2]->ptr)) == NULL) {
+            addReply(c, shared.nullbulk);
+            return;
+        }
+        size_t usage = objectComputeSize(dictGetVal(de),samples);
+        usage += sdsAllocSize(dictGetKey(de));
         usage += sizeof(dictEntry);
         addReplyLongLong(c,usage);
     } else if (!strcasecmp(c->argv[1]->ptr,"stats") && c->argc == 2) {
@@ -1434,19 +1445,7 @@ void memoryCommand(client *c) {
         addReply(c, shared.ok);
         /* Nothing to do for other allocators. */
 #endif
-    } else if (!strcasecmp(c->argv[1]->ptr,"help") && c->argc == 2) {
-        addReplyMultiBulkLen(c,5);
-        addReplyBulkCString(c,
-"MEMORY DOCTOR                        - Outputs memory problems report");
-        addReplyBulkCString(c,
-"MEMORY USAGE <key> [SAMPLES <count>] - Estimate memory usage of key");
-        addReplyBulkCString(c,
-"MEMORY STATS                         - Show memory usage details");
-        addReplyBulkCString(c,
-"MEMORY PURGE                         - Ask the allocator to release memory");
-        addReplyBulkCString(c,
-"MEMORY MALLOC-STATS                  - Show allocator internal stats");
     } else {
-        addReplyError(c,"Syntax error. Try MEMORY HELP");
+        addReplyErrorFormat(c, "Unknown subcommand or wrong number of arguments for '%s'. Try MEMORY HELP", (char*)c->argv[1]->ptr);
     }
 }
